@@ -38,11 +38,22 @@ telegram_app = (
 )
 
 
-# Yandex Music client
-yandex_client = Client(YANDEX_TOKEN).init()
+# =========================
+# YANDEX MUSIC
+# =========================
+
+try:
+    yandex_client = Client(YANDEX_TOKEN).init()
+    print("Yandex Music client initialized")
+except Exception as e:
+    yandex_client = None
+    print("Yandex Music initialization error:", repr(e))
 
 
-# Last playlist for every Telegram user
+# =========================
+# USER PLAYLISTS
+# =========================
+
 user_playlists = {}
 
 
@@ -78,6 +89,15 @@ async def show_progress(message, stop_event, text):
         "████████░░",
         "█████████░",
         "██████████",
+        "█████████░",
+        "████████░░",
+        "███████░░░",
+        "██████░░░░",
+        "█████░░░░░",
+        "████░░░░░░",
+        "███░░░░░░░",
+        "██░░░░░░░░",
+        "█░░░░░░░░░",
     ]
 
     index = 0
@@ -86,10 +106,9 @@ async def show_progress(message, stop_event, text):
 
         try:
             await message.edit_text(
-                f"🎧 **{text}**\n\n"
-                f"`{frames[index]}`\n\n"
-                "Пожалуйста, подожди.",
-                parse_mode="Markdown"
+                f"🎧 {text}\n\n"
+                f"{frames[index]}\n\n"
+                "Пожалуйста, подожди."
             )
         except Exception:
             pass
@@ -106,7 +125,7 @@ async def show_progress(message, stop_event, text):
 
 
 # =========================
-# SAVE PLAYLIST
+# RECEIVE PLAYLIST
 # =========================
 
 async def message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -115,13 +134,18 @@ async def message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = update.message.text.strip()
 
+    if not text:
+        await update.message.reply_text(
+            "Пришли список треков текстом."
+        )
+        return
+
     user_playlists[user_id] = text
 
     await update.message.reply_text(
-        "✅ **Плейлист получил.**\n\n"
-        "Теперь напиши `/make`.\n\n"
-        "Я подберу похожие треки и проверю их в Яндекс Музыке.",
-        parse_mode="Markdown"
+        "✅ Плейлист получил.\n\n"
+        "Теперь напиши /make.\n\n"
+        "Я подберу похожие треки и проверю их в Яндекс Музыке."
     )
 
 
@@ -131,6 +155,9 @@ async def message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def search_yandex_track(query):
 
+    if yandex_client is None:
+        return None
+
     try:
 
         result = yandex_client.search(
@@ -139,15 +166,16 @@ def search_yandex_track(query):
             page=0
         )
 
-        tracks = result.tracks
-
-        if not tracks:
+        if not result:
             return None
 
-        if not tracks.results:
+        if not result.tracks:
             return None
 
-        track = tracks.results[0]
+        if not result.tracks.results:
+            return None
+
+        track = result.tracks.results[0]
 
         title = track.title
 
@@ -165,12 +193,13 @@ def search_yandex_track(query):
 
         if album_id:
             url = (
-                f"https://music.yandex.ru/album/"
+                "https://music.yandex.ru/album/"
                 f"{album_id}/track/{track_id}"
             )
         else:
             url = (
-                f"https://music.yandex.ru/track/{track_id}"
+                "https://music.yandex.ru/track/"
+                f"{track_id}"
             )
 
         return {
@@ -183,7 +212,7 @@ def search_yandex_track(query):
 
         print(
             "Yandex search error:",
-            str(e)
+            repr(e)
         )
 
         return None
@@ -197,22 +226,33 @@ async def make(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_id = update.effective_user.id
 
+    # Check playlist
     if user_id not in user_playlists:
 
         await update.message.reply_text(
-            "У меня пока нет исходного плейлиста.\n\n"
+            "У меня пока нет твоего исходного плейлиста.\n\n"
             "Сначала пришли мне список треков."
+        )
+
+        return
+
+    # Check Yandex
+    if yandex_client is None:
+
+        await update.message.reply_text(
+            "❌ Не удалось подключиться к Яндекс Музыке.\n\n"
+            "Проверь переменную YANDEX_TOKEN в Render."
         )
 
         return
 
     playlist = user_playlists[user_id]
 
+    # Status message
     status_message = await update.message.reply_text(
-        "🎧 **Создаю новый плейлист...**\n\n"
-        "`░░░░░░░░░░`\n\n"
-        "Подбираю похожую музыку.",
-        parse_mode="Markdown"
+        "🎧 Создаю новый плейлист...\n\n"
+        "░░░░░░░░░░\n\n"
+        "Подбираю похожую музыку."
     )
 
     stop_event = asyncio.Event()
@@ -305,6 +345,10 @@ async def make(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+        # =========================
+        # OPENROUTER ERROR
+        # =========================
+
         if response.status_code != 200:
 
             stop_event.set()
@@ -312,13 +356,17 @@ async def make(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await progress_task
 
             await status_message.edit_text(
-                f"❌ OpenRouter error: "
+                "❌ OpenRouter error:\n\n"
                 f"{response.status_code}\n\n"
                 f"{response.text[:1000]}"
             )
 
             return
 
+
+        # =========================
+        # READ AI RESPONSE
+        # =========================
 
         data = response.json()
 
@@ -332,10 +380,12 @@ async def make(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # SEARCH IN YANDEX
         # =========================
 
+        stop_event.set()
+
+        await progress_task
+
         await status_message.edit_text(
-            "🔎 **Проверяю треки в Яндекс Музыке...**\n\n"
-            "`████░░░░░░`",
-            parse_mode="Markdown"
+            "🔎 Проверяю треки в Яндекс Музыке..."
         )
 
 
@@ -355,7 +405,11 @@ async def make(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "0123456789.-) "
             ).strip()
 
-            if "—" not in line and "-" not in line:
+            # Ignore explanations
+            if (
+                "—" not in line
+                and " - " not in line
+            ):
                 continue
 
             found = await asyncio.to_thread(
@@ -365,34 +419,52 @@ async def make(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if found:
 
-                results.append(found)
+                # Avoid duplicates
+                duplicate = False
 
-            # Stop at 30
+                for existing in results:
+
+                    if (
+                        existing["title"].lower()
+                        == found["title"].lower()
+                        and
+                        existing["artists"].lower()
+                        == found["artists"].lower()
+                    ):
+                        duplicate = True
+                        break
+
+                if not duplicate:
+                    results.append(found)
+
+            # Maximum 30
             if len(results) >= 30:
                 break
 
 
-        stop_event.set()
-
-        await progress_task
-
+        # =========================
+        # NOTHING FOUND
+        # =========================
 
         if not results:
 
             await status_message.edit_text(
-                "❌ Не удалось найти "
-                "рекомендации в Яндекс Музыке.\n\n"
+                "❌ Не удалось найти рекомендации "
+                "в Яндекс Музыке.\n\n"
                 "Попробуй ещё раз."
             )
 
             return
 
 
+        # =========================
+        # READY
+        # =========================
+
         await status_message.edit_text(
-            f"✅ **Готово!**\n\n"
+            "✅ Готово!\n\n"
             f"Нашёл {len(results)} треков "
-            f"в Яндекс Музыке.",
-            parse_mode="Markdown"
+            "в Яндекс Музыке."
         )
 
 
@@ -405,10 +477,14 @@ async def make(update: Update, context: ContextTypes.DEFAULT_TYPE):
             start=1
         ):
 
+            # IMPORTANT:
+            # No Markdown here.
+            # This prevents Telegram entity errors.
+
             text = (
-                f"🎵 **{number}. "
+                f"🎵 {number}. "
                 f"{track['artists']} — "
-                f"{track['title']}**"
+                f"{track['title']}"
             )
 
             keyboard = InlineKeyboardMarkup(
@@ -422,42 +498,73 @@ async def make(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ]
             )
 
-            await update.message.reply_text(
-                text,
-                parse_mode="Markdown",
-                reply_markup=keyboard
-            )
+            try:
 
-            # Small pause so Telegram isn't flooded
+                await update.message.reply_text(
+                    text,
+                    reply_markup=keyboard
+                )
+
+            except Exception as e:
+
+                print(
+                    "Telegram send error:",
+                    repr(e)
+                )
+
+                # Fallback without special characters
+                await update.message.reply_text(
+                    f"{number}. "
+                    f"{track['artists']} - "
+                    f"{track['title']}\n\n"
+                    f"{track['url']}"
+                )
+
             await asyncio.sleep(0.15)
 
 
+        # =========================
+        # FINISHED
+        # =========================
+
         await update.message.reply_text(
-            "🎧 **Плейлист закончен.**\n\n"
+            "🎧 Плейлист закончен.\n\n"
             "Все найденные треки можно открыть "
-            "прямо в Яндекс Музыке.",
-            parse_mode="Markdown"
+            "прямо в Яндекс Музыке."
         )
 
+
+    # =========================
+    # TIMEOUT
+    # =========================
 
     except requests.exceptions.Timeout:
 
         stop_event.set()
 
-        await progress_task
+        try:
+            await progress_task
+        except Exception:
+            pass
 
         await status_message.edit_text(
-            "⏱ **Время ожидания истекло.**\n\n"
-            "Попробуй `/make` ещё раз.",
-            parse_mode="Markdown"
+            "⏱ Время ожидания истекло.\n\n"
+            "Попробуй /make ещё раз."
         )
 
+
+    # =========================
+    # GENERAL ERROR
+    # =========================
 
     except Exception as e:
 
         stop_event.set()
 
-        await progress_task
+        try:
+            await progress_task
+        except Exception:
+            pass
 
         print(
             "MAKE ERROR:",
@@ -465,9 +572,8 @@ async def make(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         await status_message.edit_text(
-            "❌ **Произошла ошибка.**\n\n"
-            f"`{str(e)[:1000]}`",
-            parse_mode="Markdown"
+            "❌ Произошла ошибка.\n\n"
+            f"{str(e)[:1000]}"
         )
 
 
@@ -499,7 +605,7 @@ def run_flask():
 
 
 # =========================
-# TELEGRAM
+# TELEGRAM HANDLERS
 # =========================
 
 telegram_app.add_handler(
@@ -538,6 +644,7 @@ if __name__ == "__main__":
     flask_thread.start()
 
 
+    # Remove old webhook
     try:
 
         requests.post(
@@ -550,6 +657,7 @@ if __name__ == "__main__":
         pass
 
 
+    # Start Telegram bot
     telegram_app.run_polling(
         drop_pending_updates=True
     )
