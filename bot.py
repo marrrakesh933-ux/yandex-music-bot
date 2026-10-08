@@ -16,18 +16,9 @@ from telegram.ext import (
 from yandex_music import Client
 
 
-# =========================
-# ENVIRONMENT VARIABLES
-# =========================
-
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 OPENROUTER_API_KEY = os.environ["OPENROUTER_API_KEY"]
 YANDEX_TOKEN = os.environ["YANDEX_TOKEN"]
-
-
-# =========================
-# APP
-# =========================
 
 app = Flask(__name__)
 
@@ -37,10 +28,9 @@ telegram_app = (
     .build()
 )
 
-
-# =========================
+# --------------------------------------------------
 # YANDEX MUSIC
-# =========================
+# --------------------------------------------------
 
 try:
     yandex_client = Client(YANDEX_TOKEN).init()
@@ -50,33 +40,36 @@ except Exception as e:
     print("Yandex Music initialization error:", repr(e))
 
 
-# =========================
-# USER PLAYLISTS
-# =========================
+# --------------------------------------------------
+# USER DATA
+# --------------------------------------------------
 
+# Исходные плейлисты пользователей
 user_playlists = {}
 
+# Последние найденные треки для /playlist
+user_results = {}
 
-# =========================
+
+# --------------------------------------------------
 # START
-# =========================
+# --------------------------------------------------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
     await update.message.reply_text(
         "Я онлайн.\n\n"
         "Пришли мне список треков.\n\n"
-        "После этого напиши /make — "
-        "я подберу похожую музыку и найду её в Яндекс Музыке."
+        "После этого:\n"
+        "/make — подобрать похожую музыку\n"
+        "/playlist — создать из результата плейлист в Яндекс Музыке"
     )
 
 
-# =========================
-# PROGRESS ANIMATION
-# =========================
+# --------------------------------------------------
+# PROGRESS BAR
+# --------------------------------------------------
 
 async def show_progress(message, stop_event, text):
-
     frames = [
         "░░░░░░░░░░",
         "█░░░░░░░░░",
@@ -124,12 +117,11 @@ async def show_progress(message, stop_event, text):
             pass
 
 
-# =========================
+# --------------------------------------------------
 # RECEIVE PLAYLIST
-# =========================
+# --------------------------------------------------
 
 async def message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
     user_id = update.effective_user.id
 
     text = update.message.text.strip()
@@ -142,16 +134,19 @@ async def message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_playlists[user_id] = text
 
+    # Старый результат больше не актуален
+    user_results.pop(user_id, None)
+
     await update.message.reply_text(
         "✅ Плейлист получил.\n\n"
         "Теперь напиши /make.\n\n"
-        "Я подберу похожие треки и проверю их в Яндекс Музыке."
+        "Я подберу похожие треки и найду их в Яндекс Музыке."
     )
 
 
-# =========================
-# SEARCH YANDEX MUSIC
-# =========================
+# --------------------------------------------------
+# SEARCH TRACK IN YANDEX MUSIC
+# --------------------------------------------------
 
 def search_yandex_track(query):
 
@@ -205,6 +200,8 @@ def search_yandex_track(query):
         return {
             "title": title,
             "artists": artists,
+            "track_id": track_id,
+            "album_id": album_id,
             "url": url,
         }
 
@@ -218,15 +215,14 @@ def search_yandex_track(query):
         return None
 
 
-# =========================
-# MAKE PLAYLIST
-# =========================
+# --------------------------------------------------
+# MAKE
+# --------------------------------------------------
 
 async def make(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_id = update.effective_user.id
 
-    # Check playlist
     if user_id not in user_playlists:
 
         await update.message.reply_text(
@@ -236,19 +232,17 @@ async def make(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         return
 
-    # Check Yandex
     if yandex_client is None:
 
         await update.message.reply_text(
             "❌ Не удалось подключиться к Яндекс Музыке.\n\n"
-            "Проверь переменную YANDEX_TOKEN в Render."
+            "Проверь YANDEX_TOKEN в Render."
         )
 
         return
 
     playlist = user_playlists[user_id]
 
-    # Status message
     status_message = await update.message.reply_text(
         "🎧 Создаю новый плейлист...\n\n"
         "░░░░░░░░░░\n\n"
@@ -267,13 +261,8 @@ async def make(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
 
-        # =========================
-        # OPENROUTER
-        # =========================
-
         response = await asyncio.to_thread(
             requests.post,
-
             "https://openrouter.ai/api/v1/chat/completions",
 
             headers={
@@ -285,7 +274,6 @@ async def make(update: Update, context: ContextTypes.DEFAULT_TYPE):
             },
 
             json={
-
                 "model": "openrouter/free",
 
                 "messages": [
@@ -294,14 +282,13 @@ async def make(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         "role": "system",
 
                         "content": (
-
                             "You are a music curator.\n\n"
 
                             "Create a NEW playlist based on "
                             "the user's existing playlist.\n\n"
 
                             "Do NOT analyze the user's personality.\n"
-                            "Do NOT explain their psychology.\n"
+                            "Do NOT explain their psychology.\n\n"
 
                             "Find music similar by:\n"
                             "- sound\n"
@@ -337,17 +324,11 @@ async def make(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             "Create 30 similar songs."
                         )
                     }
-
                 ]
             },
 
             timeout=90
         )
-
-
-        # =========================
-        # OPENROUTER ERROR
-        # =========================
 
         if response.status_code != 200:
 
@@ -363,22 +344,11 @@ async def make(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             return
 
-
-        # =========================
-        # READ AI RESPONSE
-        # =========================
-
         data = response.json()
 
         ai_answer = (
-            data["choices"][0]
-            ["message"]["content"]
+            data["choices"][0]["message"]["content"]
         )
-
-
-        # =========================
-        # SEARCH IN YANDEX
-        # =========================
 
         stop_event.set()
 
@@ -387,7 +357,6 @@ async def make(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status_message.edit_text(
             "🔎 Проверяю треки в Яндекс Музыке..."
         )
-
 
         lines = ai_answer.splitlines()
 
@@ -400,15 +369,14 @@ async def make(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not line:
                 continue
 
-            # Remove accidental numbering
             line = line.lstrip(
                 "0123456789.-) "
             ).strip()
 
-            # Ignore explanations
             if (
                 "—" not in line
-                and " - " not in line
+                and
+                " - " not in line
             ):
                 continue
 
@@ -419,67 +387,55 @@ async def make(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if found:
 
-                # Avoid duplicates
                 duplicate = False
 
                 for existing in results:
 
                     if (
                         existing["title"].lower()
-                        == found["title"].lower()
+                        ==
+                        found["title"].lower()
                         and
                         existing["artists"].lower()
-                        == found["artists"].lower()
+                        ==
+                        found["artists"].lower()
                     ):
                         duplicate = True
                         break
 
                 if not duplicate:
+
                     results.append(found)
 
-            # Maximum 30
             if len(results) >= 30:
                 break
-
-
-        # =========================
-        # NOTHING FOUND
-        # =========================
 
         if not results:
 
             await status_message.edit_text(
                 "❌ Не удалось найти рекомендации "
                 "в Яндекс Музыке.\n\n"
-                "Попробуй ещё раз."
+                "Попробуй /make ещё раз."
             )
 
             return
 
-
-        # =========================
-        # READY
-        # =========================
+        # Сохраняем последний результат
+        user_results[user_id] = results
 
         await status_message.edit_text(
             "✅ Готово!\n\n"
             f"Нашёл {len(results)} треков "
-            "в Яндекс Музыке."
+            "в Яндекс Музыке.\n\n"
+            "Теперь можно написать /playlist "
+            "и создать настоящий плейлист."
         )
 
-
-        # =========================
-        # SEND TRACKS
-        # =========================
-
+        # Отправляем найденные треки
         for number, track in enumerate(
             results,
             start=1
         ):
-
-            # IMPORTANT:
-            # No Markdown here.
-            # This prevents Telegram entity errors.
 
             text = (
                 f"🎵 {number}. "
@@ -512,7 +468,6 @@ async def make(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     repr(e)
                 )
 
-                # Fallback without special characters
                 await update.message.reply_text(
                     f"{number}. "
                     f"{track['artists']} - "
@@ -522,21 +477,12 @@ async def make(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             await asyncio.sleep(0.15)
 
-
-        # =========================
-        # FINISHED
-        # =========================
-
         await update.message.reply_text(
-            "🎧 Плейлист закончен.\n\n"
-            "Все найденные треки можно открыть "
-            "прямо в Яндекс Музыке."
+            "🎧 Список закончен.\n\n"
+            "Чтобы создать настоящий плейлист "
+            "в Яндекс Музыке, напиши:\n\n"
+            "/playlist"
         )
-
-
-    # =========================
-    # TIMEOUT
-    # =========================
 
     except requests.exceptions.Timeout:
 
@@ -551,11 +497,6 @@ async def make(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "⏱ Время ожидания истекло.\n\n"
             "Попробуй /make ещё раз."
         )
-
-
-    # =========================
-    # GENERAL ERROR
-    # =========================
 
     except Exception as e:
 
@@ -577,9 +518,219 @@ async def make(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-# =========================
+# --------------------------------------------------
+# CREATE YANDEX MUSIC PLAYLIST
+# --------------------------------------------------
+
+def create_yandex_playlist(results):
+
+    if yandex_client is None:
+        raise Exception(
+            "Yandex Music client is not initialized"
+        )
+
+    # Создаём новый плейлист
+    playlist = yandex_client.users_playlists_create(
+        "AI Playlist",
+        visibility="private"
+    )
+
+    if playlist is None:
+        raise Exception(
+            "Yandex Music did not return a playlist"
+        )
+
+    kind = playlist.kind
+
+    revision = getattr(
+        playlist,
+        "revision",
+        1
+    )
+
+    if not revision:
+        revision = 1
+
+    added = 0
+
+    for track in results:
+
+        track_id = track.get("track_id")
+        album_id = track.get("album_id")
+
+        if not track_id or not album_id:
+            continue
+
+        try:
+
+            current_count = getattr(
+                playlist,
+                "track_count",
+                added
+            )
+
+            updated_playlist = (
+                yandex_client.users_playlists_insert_track(
+                    kind=kind,
+                    track_id=track_id,
+                    album_id=album_id,
+                    at=current_count,
+                    revision=revision
+                )
+            )
+
+            if updated_playlist is not None:
+
+                playlist = updated_playlist
+
+                new_revision = getattr(
+                    playlist,
+                    "revision",
+                    None
+                )
+
+                if new_revision:
+                    revision = new_revision
+
+            added += 1
+
+        except Exception as e:
+
+            print(
+                "Yandex playlist add error:",
+                repr(e)
+            )
+
+            # Пробуем продолжить со следующим треком
+            continue
+
+    uid = getattr(
+        playlist,
+        "uid",
+        None
+    )
+
+    if uid is None:
+        uid = getattr(
+            yandex_client,
+            "account_uid",
+            None
+        )
+
+    if uid is not None:
+
+        url = (
+            "https://music.yandex.ru/users/"
+            f"{uid}/playlists/{kind}"
+        )
+
+    else:
+
+        url = (
+            "https://music.yandex.ru/"
+        )
+
+    return {
+        "playlist": playlist,
+        "url": url,
+        "added": added,
+    }
+
+
+# --------------------------------------------------
+# /PLAYLIST
+# --------------------------------------------------
+
+async def playlist_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    user_id = update.effective_user.id
+
+    if yandex_client is None:
+
+        await update.message.reply_text(
+            "❌ Яндекс Музыка не подключена.\n\n"
+            "Проверь YANDEX_TOKEN в Render."
+        )
+
+        return
+
+    if user_id not in user_results:
+
+        await update.message.reply_text(
+            "У меня пока нет созданного списка.\n\n"
+            "Сначала отправь исходный плейлист "
+            "и используй /make."
+        )
+
+        return
+
+    results = user_results[user_id]
+
+    status_message = await update.message.reply_text(
+        "📀 Создаю плейлист в Яндекс Музыке...\n\n"
+        "Добавляю найденные треки."
+    )
+
+    try:
+
+        result = await asyncio.to_thread(
+            create_yandex_playlist,
+            results
+        )
+
+        added = result["added"]
+        url = result["url"]
+
+        if added == 0:
+
+            await status_message.edit_text(
+                "❌ Не удалось добавить треки "
+                "в Яндекс Музыку.\n\n"
+                "Возможно, YANDEX_TOKEN не имеет "
+                "необходимого доступа."
+            )
+
+            return
+
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "🎧 Открыть плейлист",
+                        url=url
+                    )
+                ]
+            ]
+        )
+
+        await status_message.edit_text(
+            "✅ Плейлист создан!\n\n"
+            f"Добавлено треков: {added}\n\n"
+            "Он сохранён в твоём аккаунте "
+            "Яндекс Музыки.",
+            reply_markup=keyboard
+        )
+
+    except Exception as e:
+
+        print(
+            "PLAYLIST ERROR:",
+            repr(e)
+        )
+
+        await status_message.edit_text(
+            "❌ Не удалось создать плейлист "
+            "в Яндекс Музыке.\n\n"
+            f"{str(e)[:1000]}"
+        )
+
+
+# --------------------------------------------------
 # FLASK
-# =========================
+# --------------------------------------------------
 
 @app.get("/")
 def health():
@@ -604,9 +755,9 @@ def run_flask():
     )
 
 
-# =========================
+# --------------------------------------------------
 # TELEGRAM HANDLERS
-# =========================
+# --------------------------------------------------
 
 telegram_app.add_handler(
     CommandHandler(
@@ -623,6 +774,13 @@ telegram_app.add_handler(
 )
 
 telegram_app.add_handler(
+    CommandHandler(
+        "playlist",
+        playlist_command
+    )
+)
+
+telegram_app.add_handler(
     MessageHandler(
         filters.TEXT & ~filters.COMMAND,
         message
@@ -630,9 +788,9 @@ telegram_app.add_handler(
 )
 
 
-# =========================
-# MAIN
-# =========================
+# --------------------------------------------------
+# START BOT
+# --------------------------------------------------
 
 if __name__ == "__main__":
 
@@ -643,8 +801,8 @@ if __name__ == "__main__":
 
     flask_thread.start()
 
-
-    # Remove old webhook
+    # Удаляем старый webhook,
+    # чтобы polling работал нормально.
     try:
 
         requests.post(
@@ -656,8 +814,6 @@ if __name__ == "__main__":
     except Exception:
         pass
 
-
-    # Start Telegram bot
     telegram_app.run_polling(
         drop_pending_updates=True
     )
