@@ -1,6 +1,7 @@
 import os
 import asyncio
 import threading
+import re
 import requests
 
 from flask import Flask
@@ -28,48 +29,62 @@ telegram_app = (
     .build()
 )
 
-# --------------------------------------------------
+
+# ==================================================
 # YANDEX MUSIC
-# --------------------------------------------------
+# ==================================================
 
 try:
-    yandex_client = Client(YANDEX_TOKEN).init()
+    yandex_client = Client(
+        YANDEX_TOKEN,
+        report_unknown_fields=False
+    ).init()
+
     print("Yandex Music client initialized")
+
 except Exception as e:
     yandex_client = None
-    print("Yandex Music initialization error:", repr(e))
-
-
-# --------------------------------------------------
-# USER DATA
-# --------------------------------------------------
-
-# Исходные плейлисты пользователей
-user_playlists = {}
-
-# Последние найденные треки для /playlist
-user_results = {}
-
-
-# --------------------------------------------------
-# START
-# --------------------------------------------------
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Я онлайн.\n\n"
-        "Пришли мне список треков.\n\n"
-        "После этого:\n"
-        "/make — подобрать похожую музыку\n"
-        "/playlist — создать из результата плейлист в Яндекс Музыке"
+    print(
+        "Yandex Music initialization error:",
+        repr(e)
     )
 
 
-# --------------------------------------------------
-# PROGRESS BAR
-# --------------------------------------------------
+# ==================================================
+# DATA
+# ==================================================
 
-async def show_progress(message, stop_event, text):
+user_playlists = {}
+user_results = {}
+
+
+# ==================================================
+# START
+# ==================================================
+
+async def start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    await update.message.reply_text(
+        "Я онлайн.\n\n"
+        "Пришли мне список треков.\n\n"
+        "/make — подобрать похожую музыку\n"
+        "/playlist — создать плейлист в Яндекс Музыке"
+    )
+
+
+# ==================================================
+# PROGRESS
+# ==================================================
+
+async def show_progress(
+    message,
+    stop_event,
+    text
+):
+
     frames = [
         "░░░░░░░░░░",
         "█░░░░░░░░░",
@@ -106,7 +121,9 @@ async def show_progress(message, stop_event, text):
         except Exception:
             pass
 
-        index = (index + 1) % len(frames)
+        index = (
+            index + 1
+        ) % len(frames)
 
         try:
             await asyncio.wait_for(
@@ -117,11 +134,15 @@ async def show_progress(message, stop_event, text):
             pass
 
 
-# --------------------------------------------------
+# ==================================================
 # RECEIVE PLAYLIST
-# --------------------------------------------------
+# ==================================================
 
-async def message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def message(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
     user_id = update.effective_user.id
 
     text = update.message.text.strip()
@@ -134,19 +155,99 @@ async def message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_playlists[user_id] = text
 
-    # Старый результат больше не актуален
-    user_results.pop(user_id, None)
+    # Старый результат удаляем,
+    # потому что исходный плейлист изменился.
+    user_results.pop(
+        user_id,
+        None
+    )
 
     await update.message.reply_text(
         "✅ Плейлист получил.\n\n"
-        "Теперь напиши /make.\n\n"
-        "Я подберу похожие треки и найду их в Яндекс Музыке."
+        "Теперь напиши /make."
     )
 
 
-# --------------------------------------------------
-# SEARCH TRACK IN YANDEX MUSIC
-# --------------------------------------------------
+# ==================================================
+# CLEAN AI LINE
+# ==================================================
+
+def clean_ai_line(line):
+
+    line = line.strip()
+
+    # Убираем markdown
+    line = line.replace("**", "")
+    line = line.replace("__", "")
+    line = line.replace("`", "")
+
+    # Убираем нумерацию
+    line = re.sub(
+        r"^\s*\d+\s*[\.\)\-:]\s*",
+        "",
+        line
+    )
+
+    # Убираем bullet
+    line = re.sub(
+        r"^\s*[-*•]\s*",
+        "",
+        line
+    )
+
+    return line.strip()
+
+
+# ==================================================
+# SPLIT ARTIST / TITLE
+# ==================================================
+
+def parse_track_line(line):
+
+    line = clean_ai_line(line)
+
+    if not line:
+        return None
+
+    separators = [
+        " — ",
+        " – ",
+        " - ",
+        " —",
+        "–",
+        "-"
+    ]
+
+    for separator in separators:
+
+        if separator in line:
+
+            parts = line.split(
+                separator,
+                1
+            )
+
+            artist = parts[0].strip()
+            title = parts[1].strip()
+
+            if artist and title:
+
+                return {
+                    "artist": artist,
+                    "title": title,
+                    "query": f"{artist} {title}"
+                }
+
+    return {
+        "artist": "",
+        "title": line,
+        "query": line
+    }
+
+
+# ==================================================
+# SEARCH YANDEX
+# ==================================================
 
 def search_yandex_track(query):
 
@@ -155,22 +256,67 @@ def search_yandex_track(query):
 
     try:
 
+        print(
+            "YANDEX SEARCH:",
+            query
+        )
+
+        # ------------------------------------------
+        # FIRST SEARCH
+        # ------------------------------------------
+
         result = yandex_client.search(
             query,
             type_="track",
             page=0
         )
 
-        if not result:
-            return None
+        if (
+            result
+            and result.tracks
+            and result.tracks.results
+        ):
 
-        if not result.tracks:
-            return None
+            track = result.tracks.results[0]
 
-        if not result.tracks.results:
-            return None
+        else:
 
-        track = result.tracks.results[0]
+            # --------------------------------------
+            # SECOND SEARCH:
+            # title only / simplified query
+            # --------------------------------------
+
+            parsed = parse_track_line(query)
+
+            fallback_query = (
+                parsed["title"]
+                if parsed
+                else query
+            )
+
+            print(
+                "YANDEX FALLBACK:",
+                fallback_query
+            )
+
+            result = yandex_client.search(
+                fallback_query,
+                type_="track",
+                page=0
+            )
+
+            if (
+                not result
+                or not result.tracks
+                or not result.tracks.results
+            ):
+                return None
+
+            track = result.tracks.results[0]
+
+        # ------------------------------------------
+        # DATA
+        # ------------------------------------------
 
         title = track.title
 
@@ -184,18 +330,33 @@ def search_yandex_track(query):
         album_id = None
 
         if track.albums:
+
             album_id = track.albums[0].id
 
+        # ------------------------------------------
+        # URL
+        # ------------------------------------------
+
         if album_id:
+
             url = (
                 "https://music.yandex.ru/album/"
                 f"{album_id}/track/{track_id}"
             )
+
         else:
+
             url = (
                 "https://music.yandex.ru/track/"
                 f"{track_id}"
             )
+
+        print(
+            "YANDEX FOUND:",
+            artists,
+            "-",
+            title
+        )
 
         return {
             "title": title,
@@ -208,26 +369,28 @@ def search_yandex_track(query):
     except Exception as e:
 
         print(
-            "Yandex search error:",
+            "YANDEX SEARCH ERROR:",
             repr(e)
         )
 
         return None
 
 
-# --------------------------------------------------
+# ==================================================
 # MAKE
-# --------------------------------------------------
+# ==================================================
 
-async def make(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def make(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     user_id = update.effective_user.id
 
     if user_id not in user_playlists:
 
         await update.message.reply_text(
-            "У меня пока нет твоего исходного плейлиста.\n\n"
-            "Сначала пришли мне список треков."
+            "Сначала пришли мне исходный список треков."
         )
 
         return
@@ -235,13 +398,13 @@ async def make(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if yandex_client is None:
 
         await update.message.reply_text(
-            "❌ Не удалось подключиться к Яндекс Музыке.\n\n"
+            "❌ Яндекс Музыка не подключена.\n\n"
             "Проверь YANDEX_TOKEN в Render."
         )
 
         return
 
-    playlist = user_playlists[user_id]
+    source_playlist = user_playlists[user_id]
 
     status_message = await update.message.reply_text(
         "🎧 Создаю новый плейлист...\n\n"
@@ -261,8 +424,13 @@ async def make(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
 
+        # ==================================================
+        # OPENROUTER
+        # ==================================================
+
         response = await asyncio.to_thread(
             requests.post,
+
             "https://openrouter.ai/api/v1/chat/completions",
 
             headers={
@@ -282,35 +450,37 @@ async def make(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         "role": "system",
 
                         "content": (
-                            "You are a music curator.\n\n"
+                            "You are a professional music curator.\n\n"
 
-                            "Create a NEW playlist based on "
-                            "the user's existing playlist.\n\n"
+                            "The user will give you an existing "
+                            "playlist.\n\n"
 
-                            "Do NOT analyze the user's personality.\n"
-                            "Do NOT explain their psychology.\n\n"
+                            "Create a NEW playlist of 30 REAL songs "
+                            "that sound similar to it.\n\n"
 
-                            "Find music similar by:\n"
-                            "- sound\n"
+                            "Match:\n"
                             "- genre\n"
+                            "- sound\n"
                             "- atmosphere\n"
                             "- energy\n"
                             "- production\n"
                             "- artists\n"
                             "- musical style\n\n"
 
-                            "Do not repeat songs from the original playlist.\n\n"
+                            "Do NOT analyze personality.\n"
+                            "Do NOT explain psychology.\n"
+                            "Do NOT explain your choices.\n\n"
 
-                            "Return exactly 30 real songs.\n\n"
+                            "Do NOT repeat songs from the source playlist.\n\n"
 
-                            "Use this format ONLY:\n\n"
+                            "IMPORTANT:\n"
+                            "Return ONLY song lines.\n"
+                            "One song per line.\n\n"
 
-                            "Artist — Song\n"
-                            "Artist — Song\n"
+                            "Format:\n"
                             "Artist — Song\n\n"
 
-                            "No numbering.\n"
-                            "No explanations."
+                            "Exactly 30 songs."
                         )
                     },
 
@@ -318,31 +488,43 @@ async def make(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         "role": "user",
 
                         "content": (
-                            "Here is my existing playlist:\n\n"
-                            + playlist
+                            "SOURCE PLAYLIST:\n\n"
+                            + source_playlist
                             + "\n\n"
-                            "Create 30 similar songs."
+                            "Give me 30 similar real songs."
                         )
                     }
+
                 ]
             },
 
             timeout=90
         )
 
+        # ==================================================
+        # OPENROUTER ERROR
+        # ==================================================
+
         if response.status_code != 200:
 
             stop_event.set()
 
-            await progress_task
+            try:
+                await progress_task
+            except Exception:
+                pass
 
             await status_message.edit_text(
                 "❌ OpenRouter error:\n\n"
                 f"{response.status_code}\n\n"
-                f"{response.text[:1000]}"
+                f"{response.text[:1500]}"
             )
 
             return
+
+        # ==================================================
+        # PARSE RESPONSE
+        # ==================================================
 
         data = response.json()
 
@@ -350,39 +532,59 @@ async def make(update: Update, context: ContextTypes.DEFAULT_TYPE):
             data["choices"][0]["message"]["content"]
         )
 
-        stop_event.set()
-
-        await progress_task
-
-        await status_message.edit_text(
-            "🔎 Проверяю треки в Яндекс Музыке..."
+        print(
+            "========== OPENROUTER =========="
         )
 
-        lines = ai_answer.splitlines()
+        print(ai_answer)
+
+        print(
+            "================================"
+        )
+
+        stop_event.set()
+
+        try:
+            await progress_task
+        except Exception:
+            pass
+
+        await status_message.edit_text(
+            "🔎 ИИ подобрал треки.\n\n"
+            "Теперь ищу их в Яндекс Музыке..."
+        )
+
+        # ==================================================
+        # SEARCH
+        # ==================================================
 
         results = []
 
-        for line in lines:
+        parsed_lines = []
 
-            line = line.strip()
+        for raw_line in ai_answer.splitlines():
 
-            if not line:
-                continue
+            parsed = parse_track_line(
+                raw_line
+            )
 
-            line = line.lstrip(
-                "0123456789.-) "
-            ).strip()
+            if parsed:
+                parsed_lines.append(parsed)
 
-            if (
-                "—" not in line
-                and
-                " - " not in line
-            ):
-                continue
+        print(
+            "AI TRACKS:",
+            len(parsed_lines)
+        )
+
+        # Ищем максимум 40 кандидатов,
+        # чтобы получить до 30 хороших результатов.
+        for parsed in parsed_lines[:40]:
+
+            query = parsed["query"]
 
             found = await asyncio.to_thread(
                 search_yandex_track,
-                line
+                query
             )
 
             if found:
@@ -392,13 +594,9 @@ async def make(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 for existing in results:
 
                     if (
-                        existing["title"].lower()
+                        existing["track_id"]
                         ==
-                        found["title"].lower()
-                        and
-                        existing["artists"].lower()
-                        ==
-                        found["artists"].lower()
+                        found["track_id"]
                     ):
                         duplicate = True
                         break
@@ -410,28 +608,42 @@ async def make(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if len(results) >= 30:
                 break
 
+        # ==================================================
+        # NOTHING FOUND
+        # ==================================================
+
         if not results:
 
+            print(
+                "NO YANDEX RESULTS"
+            )
+
             await status_message.edit_text(
-                "❌ Не удалось найти рекомендации "
-                "в Яндекс Музыке.\n\n"
-                "Попробуй /make ещё раз."
+                "❌ Яндекс Музыка не вернула ни одного трека.\n\n"
+                "Посмотри Render → Logs: там будут строки "
+                "`YANDEX SEARCH` и `YANDEX SEARCH ERROR`."
             )
 
             return
 
-        # Сохраняем последний результат
+        # ==================================================
+        # SAVE RESULTS
+        # ==================================================
+
         user_results[user_id] = results
 
         await status_message.edit_text(
             "✅ Готово!\n\n"
             f"Нашёл {len(results)} треков "
             "в Яндекс Музыке.\n\n"
-            "Теперь можно написать /playlist "
-            "и создать настоящий плейлист."
+            "Можно написать /playlist — "
+            "и я создам настоящий плейлист."
         )
 
-        # Отправляем найденные треки
+        # ==================================================
+        # SEND TRACKS
+        # ==================================================
+
         for number, track in enumerate(
             results,
             start=1
@@ -464,7 +676,7 @@ async def make(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
 
                 print(
-                    "Telegram send error:",
+                    "TELEGRAM SEND ERROR:",
                     repr(e)
                 )
 
@@ -475,12 +687,14 @@ async def make(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"{track['url']}"
                 )
 
-            await asyncio.sleep(0.15)
+            await asyncio.sleep(
+                0.15
+            )
 
         await update.message.reply_text(
-            "🎧 Список закончен.\n\n"
-            "Чтобы создать настоящий плейлист "
-            "в Яндекс Музыке, напиши:\n\n"
+            "🎧 Всё.\n\n"
+            "Чтобы собрать эти треки "
+            "в один плейлист Яндекс Музыки:\n\n"
             "/playlist"
         )
 
@@ -494,7 +708,7 @@ async def make(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
         await status_message.edit_text(
-            "⏱ Время ожидания истекло.\n\n"
+            "⏱ OpenRouter слишком долго отвечает.\n\n"
             "Попробуй /make ещё раз."
         )
 
@@ -513,111 +727,113 @@ async def make(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         await status_message.edit_text(
-            "❌ Произошла ошибка.\n\n"
-            f"{str(e)[:1000]}"
+            "❌ Ошибка:\n\n"
+            f"{str(e)[:1500]}"
         )
 
 
-# --------------------------------------------------
-# CREATE YANDEX MUSIC PLAYLIST
-# --------------------------------------------------
+# ==================================================
+# CREATE PLAYLIST
+# ==================================================
 
-def create_yandex_playlist(results):
+def create_yandex_playlist(
+    results
+):
 
     if yandex_client is None:
+
         raise Exception(
-            "Yandex Music client is not initialized"
+            "Yandex client is not initialized"
         )
 
-    # Создаём новый плейлист
-    playlist = yandex_client.users_playlists_create(
-        "AI Playlist",
-        visibility="private"
+    # Создаём плейлист
+    playlist = (
+        yandex_client.users_playlists_create(
+            "AI Playlist",
+            visibility="private"
+        )
     )
 
-    if playlist is None:
+    if not playlist:
+
         raise Exception(
-            "Yandex Music did not return a playlist"
+            "Yandex did not create playlist"
         )
 
     kind = playlist.kind
 
-    revision = getattr(
-        playlist,
-        "revision",
-        1
-    )
-
-    if not revision:
-        revision = 1
-
     added = 0
 
+    # ВАЖНО:
+    # перед каждым добавлением получаем
+    # актуальную ревизию плейлиста.
     for track in results:
 
-        track_id = track.get("track_id")
-        album_id = track.get("album_id")
+        track_id = track.get(
+            "track_id"
+        )
+
+        album_id = track.get(
+            "album_id"
+        )
 
         if not track_id or not album_id:
             continue
 
         try:
 
-            current_count = getattr(
-                playlist,
+            current_playlist = (
+                yandex_client.users_playlists(
+                    kind
+                )
+            )
+
+            revision = (
+                current_playlist.revision
+            )
+
+            track_count = getattr(
+                current_playlist,
                 "track_count",
                 added
             )
 
-            updated_playlist = (
-                yandex_client.users_playlists_insert_track(
-                    kind=kind,
-                    track_id=track_id,
-                    album_id=album_id,
-                    at=current_count,
-                    revision=revision
-                )
+            yandex_client.users_playlists_insert_track(
+                kind,
+                track_id,
+                album_id,
+                at=track_count,
+                revision=revision
             )
 
-            if updated_playlist is not None:
-
-                playlist = updated_playlist
-
-                new_revision = getattr(
-                    playlist,
-                    "revision",
-                    None
-                )
-
-                if new_revision:
-                    revision = new_revision
-
             added += 1
+
+            print(
+                "PLAYLIST ADDED:",
+                track["artists"],
+                "-",
+                track["title"]
+            )
 
         except Exception as e:
 
             print(
-                "Yandex playlist add error:",
+                "PLAYLIST ADD ERROR:",
                 repr(e)
             )
 
-            # Пробуем продолжить со следующим треком
-            continue
+    # UID аккаунта
+    try:
 
-    uid = getattr(
-        playlist,
-        "uid",
-        None
-    )
-
-    if uid is None:
-        uid = getattr(
-            yandex_client,
-            "account_uid",
-            None
+        uid = (
+            yandex_client.me.account.uid
         )
 
-    if uid is not None:
+    except Exception:
+
+        uid = None
+
+    if uid:
 
         url = (
             "https://music.yandex.ru/users/"
@@ -631,15 +847,15 @@ def create_yandex_playlist(results):
         )
 
     return {
-        "playlist": playlist,
         "url": url,
         "added": added,
+        "kind": kind,
     }
 
 
-# --------------------------------------------------
+# ==================================================
 # /PLAYLIST
-# --------------------------------------------------
+# ==================================================
 
 async def playlist_command(
     update: Update,
@@ -651,8 +867,7 @@ async def playlist_command(
     if yandex_client is None:
 
         await update.message.reply_text(
-            "❌ Яндекс Музыка не подключена.\n\n"
-            "Проверь YANDEX_TOKEN в Render."
+            "❌ Яндекс Музыка не подключена."
         )
 
         return
@@ -660,9 +875,9 @@ async def playlist_command(
     if user_id not in user_results:
 
         await update.message.reply_text(
-            "У меня пока нет созданного списка.\n\n"
-            "Сначала отправь исходный плейлист "
-            "и используй /make."
+            "У меня пока нет готового списка.\n\n"
+            "Сначала сделай:\n"
+            "/make"
         )
 
         return
@@ -671,7 +886,7 @@ async def playlist_command(
 
     status_message = await update.message.reply_text(
         "📀 Создаю плейлист в Яндекс Музыке...\n\n"
-        "Добавляю найденные треки."
+        "Добавляю треки."
     )
 
     try:
@@ -687,10 +902,9 @@ async def playlist_command(
         if added == 0:
 
             await status_message.edit_text(
-                "❌ Не удалось добавить треки "
-                "в Яндекс Музыку.\n\n"
-                "Возможно, YANDEX_TOKEN не имеет "
-                "необходимого доступа."
+                "❌ Плейлист создался, "
+                "но ни одного трека добавить не удалось.\n\n"
+                "Проверь Render Logs."
             )
 
             return
@@ -709,7 +923,7 @@ async def playlist_command(
         await status_message.edit_text(
             "✅ Плейлист создан!\n\n"
             f"Добавлено треков: {added}\n\n"
-            "Он сохранён в твоём аккаунте "
+            "Он находится в твоём аккаунте "
             "Яндекс Музыки.",
             reply_markup=keyboard
         )
@@ -722,15 +936,14 @@ async def playlist_command(
         )
 
         await status_message.edit_text(
-            "❌ Не удалось создать плейлист "
-            "в Яндекс Музыке.\n\n"
-            f"{str(e)[:1000]}"
+            "❌ Не удалось создать плейлист.\n\n"
+            f"{str(e)[:1500]}"
         )
 
 
-# --------------------------------------------------
+# ==================================================
 # FLASK
-# --------------------------------------------------
+# ==================================================
 
 @app.get("/")
 def health():
@@ -755,9 +968,9 @@ def run_flask():
     )
 
 
-# --------------------------------------------------
-# TELEGRAM HANDLERS
-# --------------------------------------------------
+# ==================================================
+# TELEGRAM
+# ==================================================
 
 telegram_app.add_handler(
     CommandHandler(
@@ -788,9 +1001,9 @@ telegram_app.add_handler(
 )
 
 
-# --------------------------------------------------
-# START BOT
-# --------------------------------------------------
+# ==================================================
+# RUN
+# ==================================================
 
 if __name__ == "__main__":
 
@@ -801,8 +1014,6 @@ if __name__ == "__main__":
 
     flask_thread.start()
 
-    # Удаляем старый webhook,
-    # чтобы polling работал нормально.
     try:
 
         requests.post(
