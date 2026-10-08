@@ -1,10 +1,12 @@
 import os
+import requests
 from flask import Flask, request
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 OPENROUTER_API_KEY = os.environ["OPENROUTER_API_KEY"]
+RENDER_URL = os.environ["RENDER_EXTERNAL_URL"]
 
 app = Flask(__name__)
 
@@ -21,8 +23,6 @@ async def message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
 
     await update.message.reply_text("Анализирую...")
-
-    import requests
 
     response = requests.post(
         "https://openrouter.ai/api/v1/chat/completions",
@@ -70,19 +70,29 @@ def health():
 
 
 @app.post("/telegram")
-async def telegram_webhook():
+def telegram_webhook():
+    import asyncio
+
     data = request.get_json(force=True)
     update = Update.de_json(data, telegram_app.bot)
 
-    await telegram_app.initialize()
-    await telegram_app.process_update(update)
-    await telegram_app.shutdown()
+    asyncio.run(telegram_app.initialize())
+    asyncio.run(telegram_app.process_update(update))
+    asyncio.run(telegram_app.shutdown())
 
     return "OK"
 
 
 if __name__ == "__main__":
-    from threading import Thread
+    import requests as req
+
+    webhook_url = RENDER_URL + "/telegram"
+
+    req.post(
+        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook",
+        json={"url": webhook_url},
+        timeout=20
+    )
 
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
