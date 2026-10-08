@@ -1,5 +1,6 @@
 import os
 import asyncio
+import threading
 import requests
 
 from flask import Flask, request
@@ -14,7 +15,6 @@ from telegram.ext import (
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 OPENROUTER_API_KEY = os.environ["OPENROUTER_API_KEY"]
-RENDER_URL = os.environ["RENDER_EXTERNAL_URL"]
 
 app = Flask(__name__)
 
@@ -28,11 +28,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def show_progress(message, stop_event):
-    """
-    Анимированная полоса.
-    Это индикатор процесса, а не реальный процент OpenRouter.
-    """
-
     frames = [
         "░░░░░░░░░░",
         "█░░░░░░░░░",
@@ -59,14 +54,15 @@ async def show_progress(message, stop_event):
     index = 0
 
     while not stop_event.is_set():
-        bar = frames[index]
-
-        await message.edit_text(
-            "🔎 **Анализирую...**\n\n"
-            f"`{bar}`\n\n"
-            "Пожалуйста, подожди.",
-            parse_mode="Markdown"
-        )
+        try:
+            await message.edit_text(
+                "🔎 **Анализирую...**\n\n"
+                f"`{frames[index]}`\n\n"
+                "Пожалуйста, подожди.",
+                parse_mode="Markdown"
+            )
+        except Exception:
+            pass
 
         index = (index + 1) % len(frames)
 
@@ -186,48 +182,37 @@ def health():
     return "Bot is alive"
 
 
-@app.post("/telegram")
-def telegram_webhook():
-    data = request.get_json(force=True)
-
-    update = Update.de_json(
-        data,
-        telegram_app.bot
-    )
-
-    asyncio.run(
-        telegram_app.initialize()
-    )
-
-    asyncio.run(
-        telegram_app.process_update(update)
-    )
-
-    asyncio.run(
-        telegram_app.shutdown()
-    )
-
-    return "OK"
-
-
-if __name__ == "__main__":
-    import requests as req
-
-    webhook_url = RENDER_URL + "/telegram"
-
-    req.post(
-        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook",
-        json={
-            "url": webhook_url
-        },
-        timeout=20
-    )
-
-    port = int(
-        os.environ.get("PORT", 10000)
-    )
+def run_flask():
+    port = int(os.environ.get("PORT", 10000))
 
     app.run(
         host="0.0.0.0",
-        port=port
+        port=port,
+        debug=False,
+        use_reloader=False
     )
+
+
+if __name__ == "__main__":
+    # Запускаем Flask отдельно,
+    # чтобы Render видел работающий веб-сервис.
+    flask_thread = threading.Thread(
+        target=run_flask,
+        daemon=True
+    )
+
+    flask_thread.start()
+
+    # Удаляем старый webhook.
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteWebhook",
+            timeout=20
+        )
+    except Exception:
+        pass
+
+    # Запускаем Telegram-бота через polling.
+    telegram_app.run_polling(
+        drop_pending_updates=True
+        )
